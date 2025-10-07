@@ -1,20 +1,7 @@
 import React, { useState } from 'react';
-import { 
-  Input, 
-  Button, 
-  Row, 
-  Col, 
-  Card, 
-  Form, 
-  Spin, 
-  Alert, 
-  Typography,
-  Space,
-  message,
-  Image,
-  Select
-} from 'antd';
+import { Input, Button, Row, Col, Card, Form, Spin, Alert, Typography, Space, message, Image, Select, Table } from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
+import { XMLParser } from 'fast-xml-parser';
 
 const { Title } = Typography;
 const { Option } = Select;
@@ -25,13 +12,12 @@ function App() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
 
-  // Функция для создания правильного SOAP запроса
+  // Функция для создания SOAP запроса
   const createSoapEnvelope = (values) => {
     const { width, height, diameter, season } = values;
     
-    // Правильный SOAP запрос согласно WSDL
-    return `
-  <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" 
+    return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" 
                xmlns:tns="Wcf.ClientService.Client.WebAPI.TS3"
                xmlns:arr="http://schemas.microsoft.com/2003/10/Serialization/Arrays">
   <soap:Header/>
@@ -57,133 +43,181 @@ function App() {
 </soap:Envelope>`;
   };
 
-  // Функция для извлечения данных из SOAP ответа
-  const parseSoapResponse = (xmlText) => {
-    try {
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-      
-      // Проверяем на наличие SOAP ошибок
-      const fault = xmlDoc.getElementsByTagName("s:Fault")[0] || 
-                   xmlDoc.getElementsByTagName("Fault")[0] ||
-                   xmlDoc.getElementsByTagName("soap:Fault")[0];
-      
-      if (fault) {
-        const faultString = fault.getElementsByTagName("faultstring")[0]?.textContent || 
-                           fault.getElementsByTagName("faultString")[0]?.textContent ||
-                           "Unknown SOAP fault";
-        throw new Error(`SOAP Error: ${faultString}`);
-      }
-
-      // Ищем результат
-      const resultElements = xmlDoc.getElementsByTagName("GetFindTyreResult");
-      if (resultElements.length > 0) {
-        const resultText = resultElements[0].textContent;
-        
-        if (resultText.trim()) {
-          try {
-            return JSON.parse(resultText);
-          } catch (jsonError) {
-            console.log("Ответ не в JSON формате, пробуем парсить XML структуру");
-            return extractDataFromXml(xmlDoc);
-          }
-        } else {
-          return { price_rest_list: [] };
-        }
-      }
-      
-      throw new Error("Не удалось найти данные в ответе");
-    } catch (error) {
-      console.error("Ошибка парсинга SOAP ответа:", error);
-      throw error;
-    }
-  };
-
-  // Функция для извлечения данных из XML структуры
-  const extractDataFromXml = (xmlDoc) => {
-    const result = {
-      price_rest_list: []
-    };
-
-    // Ищем элементы TypePriceRest
-    const typePriceRestElements = xmlDoc.getElementsByTagName("TypePriceRest");
-    
-    for (let i = 0; i < typePriceRestElements.length; i++) {
-      const element = typePriceRestElements[i];
-      const tyre = {};
-      
-      // Извлекаем все поля из структуры TypePriceRest
-      const fields = [
-        'code', 'img_big_my', 'img_big_pish', 'img_small', 
-        'marks', 'model', 'name', 'season', 'thorn', 'type', 'whpr'
-      ];
-      
-      fields.forEach(field => {
-        const fieldElement = element.getElementsByTagName(field)[0];
-        if (fieldElement) {
-          tyre[field] = fieldElement.textContent;
-        }
-      });
-      
-      result.price_rest_list.push(tyre);
-    }
-
-    return result;
-  };
-
   const handleSearch = async (values) => {
     setLoading(true);
     setError(null);
     setResults(null);
 
     try {
-      console.log('Начинаем поиск с параметрами:', values);
+      console.log('Поиск с параметрами:', values);
       
       const soapRequest = createSoapEnvelope(values);
-      console.log('SOAP запрос:', soapRequest);
 
-      // Прямой запрос к API через proxy
       const response = await fetch('/WCF/ClientService.svc', {
         method: 'POST',
         headers: {
           'Content-Type': 'text/xml; charset=utf-8',
-          'SOAPAction': '"Wcf.ClientService.Client.WebAPI.TS3/ClientService/GetFindTyre"'
+          'SOAPAction': 'Wcf.ClientService.Client.WebAPI.TS3/ClientService/GetFindTyre'
         },
         body: soapRequest
       });
-
-      console.log('Статус ответа:', response.status);
-      console.log('Заголовки ответа:', response.headers);
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const responseText = await response.text();
-      console.log('Полный ответ сервера:', responseText);
+      console.log('Полный XML ответ сервера:', responseText);
 
-      const resultData = parseSoapResponse(responseText);
-      console.log('Распарсенные данные:', resultData);
+      // Создаем парсер XML с настройками
+      const parser = new XMLParser({
+        ignoreAttributes: false,
+        attributeNamePrefix: "@_",
+        allowBooleanAttributes: true,
+        parseAttributeValue: true,
+        trimValues: true,
+        ignoreDeclaration: true,
+        ignorePiTags: true,
+        removeNSPrefix: true // Убираем namespace префиксы для удобства
+      });
 
-      if (resultData && Array.isArray(resultData.price_rest_list)) {
-        setResults(resultData);
-        message.success(`Найдено товаров: ${resultData.price_rest_list.length}`);
+      // Парсим XML в JSON
+      const jsonObj = parser.parse(responseText);
+      console.log('Преобразованный JSON:', jsonObj);
+
+      // Извлекаем данные о шинах из JSON структуры
+      let tyres = [];
+      
+      // Получаем доступ к данным через правильный путь
+      const priceRestList = jsonObj?.Envelope?.Body?.GetFindTyreResponse?.GetFindTyreResult?.PriceRestList;
+      
+      if (priceRestList && priceRestList.TypePriceRest) {
+        // Если это массив объектов
+        if (Array.isArray(priceRestList.TypePriceRest)) {
+          tyres = priceRestList.TypePriceRest;
+        } else {
+          // Если это один объект
+          tyres = [priceRestList.TypePriceRest];
+        }
+      }
+
+      console.log('Извлеченные шины из JSON:', tyres);
+
+      // ФИЛЬТРАЦИЯ: оставляем только шины нужного размера
+      const { width, height, diameter } = values;
+      
+      const filteredTyres = tyres.filter(tyre => {
+        if (!tyre.name) return false;
+        
+        // Создаем регулярное выражение для точного поиска размера
+        // Ищем формат: 185/65R15, 185/65 R15 и т.д.
+        const sizePattern = new RegExp(
+          `\\b${width}\\/${height}\\s?R?${diameter}\\b`,
+          'i'
+        );
+        
+        return sizePattern.test(tyre.name);
+      });
+
+      console.log('После фильтрации по размеру:', filteredTyres.length);
+      console.log('Отфильтрованные шины:', filteredTyres);
+
+      if (filteredTyres.length > 0) {
+        setResults({ price_rest_list: filteredTyres });
+        message.success(`Найдено товаров: ${filteredTyres.length}`);
       } else {
-        throw new Error('Не удалось получить данные о товарах');
+        setResults({ price_rest_list: [] });
+        message.info('Товары по заданным параметрам не найдены');
       }
 
     } catch (err) {
-      console.error('Ошибка поиска:', err);
-      setError(`Ошибка при поиске: ${err.message}`);
-      message.error('Ошибка при поиске товаров');
+      console.error('Ошибка:', err);
+      setError(`Ошибка: ${err.message}`);
+      message.error('Ошибка при поиске');
     } finally {
       setLoading(false);
     }
   };
 
+  // Колонки для таблицы
+  const columns = [
+    {
+      title: 'Изображение',
+      dataIndex: 'img_small',
+      key: 'img_small',
+      width: 100,
+      render: (img) => img ? (
+        <Image
+          width={60}
+          src={img}
+          alt="Шина"
+          preview={false}
+          style={{ objectFit: 'contain' }}
+        />
+      ) : 'Нет изображения'
+    },
+    {
+      title: 'Название',
+      dataIndex: 'name',
+      key: 'name',
+      render: (text) => <strong>{text}</strong>
+    },
+    {
+      title: 'Бренд',
+      dataIndex: 'marka',
+      key: 'marka'
+    },
+    {
+      title: 'Модель',
+      dataIndex: 'model',
+      key: 'model'
+    },
+    {
+      title: 'Код',
+      dataIndex: 'code',
+      key: 'code',
+      width: 120
+    },
+    {
+      title: 'Сезон',
+      dataIndex: 'season',
+      key: 'season',
+      width: 100,
+      render: (season) => {
+        const seasonMap = {
+          'S': 'Летняя',
+          'W': 'Зимняя', 
+          'A': 'Всесезонная',
+          '5': 'Всесезонная'
+        };
+        return seasonMap[season] || season;
+      }
+    },
+    {
+      title: 'Шипы',
+      dataIndex: 'thorn',
+      key: 'thorn',
+      width: 80,
+      render: (thorn) => thorn ? 'Да' : 'Нет'
+    },
+    {
+      title: 'Тип',
+      dataIndex: 'type',
+      key: 'type',
+      width: 100,
+      render: (type) => {
+        const typeMap = {
+          'car': 'Легковая',
+          'vmed': 'Внедорожник'
+        };
+        return typeMap[type] || type;
+      }
+    }
+  ];
+
   return (
     <div className="App">
-      <div style={{ padding: '20px', maxWidth: '1200px', margin: '0 auto' }}>
+      <div style={{ padding: '20px', maxWidth: '1400px', margin: '0 auto' }}>
         <Title level={1} style={{ textAlign: 'center', marginBottom: '30px' }}>
           Поиск шин
         </Title>
@@ -197,44 +231,28 @@ function App() {
               width: 185,
               height: 65,
               diameter: 15,
-              season: 'W' // По умолчанию зимняя
+              season: 'W'
             }}
           >
             <Row gutter={16} justify="center">
               <Col xs={24} sm={8} md={6}>
-                <Form.Item
-                  label="Ширина"
-                  name="width"
-                  rules={[{ required: true, message: 'Введите ширину' }]}
-                >
-                  <Input placeholder="185" type="number" min={100} max={400} />
+                <Form.Item label="Ширина" name="width" rules={[{ required: true }]}>
+                  <Input placeholder="185" type="number" />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={8} md={6}>
-                <Form.Item
-                  label="Высота"
-                  name="height"
-                  rules={[{ required: true, message: 'Введите высоту' }]}
-                >
-                  <Input placeholder="65" type="number" min={30} max={100} />
+                <Form.Item label="Высота" name="height" rules={[{ required: true }]}>
+                  <Input placeholder="65" type="number" />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={8} md={6}>
-                <Form.Item
-                  label="Диаметр"
-                  name="diameter"
-                  rules={[{ required: true, message: 'Введите диаметр' }]}
-                >
-                  <Input placeholder="15" type="number" min={10} max={25} />
+                <Form.Item label="Диаметр" name="diameter" rules={[{ required: true }]}>
+                  <Input placeholder="15" type="number" />
                 </Form.Item>
               </Col>
               <Col xs={24} sm={8} md={6}>
-                <Form.Item
-                  label="Сезон"
-                  name="season"
-                  rules={[{ required: true, message: 'Выберите сезон' }]}
-                >
-                  <Select placeholder="Выберите сезон">
+                <Form.Item label="Сезон" name="season" rules={[{ required: true }]}>
+                  <Select>
                     <Option value="W">Зимняя</Option>
                     <Option value="S">Летняя</Option>
                     <Option value="A">Всесезонная</Option>
@@ -261,27 +279,14 @@ function App() {
         {loading && (
           <div style={{ textAlign: 'center', margin: '20px 0' }}>
             <Spin size="large" />
-            <div style={{ marginTop: '10px' }}>Идёт поиск...</div>
+            <div>Идёт поиск...</div>
           </div>
         )}
 
         {error && (
           <Alert
             message="Ошибка"
-            description={
-              <div>
-                <div>{error}</div>
-                <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
-                  Проверьте:
-                  <ul>
-                    <li>Настройки proxy в package.json</li>
-                    <li>Доступность API сервиса</li>
-                    <li>Правильность логина и пароля</li>
-                    <li>Консоль браузера для подробных логов</li>
-                  </ul>
-                </div>
-              </div>
-            }
+            description={error}
             type="error"
             showIcon
             style={{ margin: '20px 0' }}
@@ -290,61 +295,25 @@ function App() {
 
         {results && (
           <Card 
-            title={
-              <div>
-                Результаты поиска 
-                <span style={{ fontSize: '14px', fontWeight: 'normal', marginLeft: '10px' }}>
-                  (Найдено: {results.price_rest_list.length})
-                </span>
-              </div>
-            } 
+            title={`Результаты поиска (Найдено: ${results.price_rest_list.length})`}
             style={{ marginTop: '20px' }}
           >
             {results.price_rest_list.length > 0 ? (
-              <Row gutter={[16, 16]}>
-                {results.price_rest_list.map((tyre, index) => (
-                  <Col xs={24} sm={12} md={8} lg={6} key={index}>
-                    <Card 
-                      size="small" 
-                      style={{ height: '100%' }}
-                      cover={
-                        tyre.img_small ? (
-                          <div style={{ padding: '10px', textAlign: 'center' }}>
-                            <Image
-                              alt={tyre.name}
-                              src={tyre.img_small}
-                              preview={false}
-                              style={{ 
-                                height: '120px', 
-                                width: 'auto',
-                                maxWidth: '100%',
-                                objectFit: 'contain' 
-                              }}
-                            />
-                          </div>
-                        ) : null
-                      }
-                    >
-                      <Card.Meta
-                        title={tyre.name || 'Шина'}
-                        description={
-                          <Space direction="vertical" style={{ width: '100%' }}>
-                            <div><strong>Бренд:</strong> {tyre.marks || 'Не указан'}</div>
-                            <div><strong>Модель:</strong> {tyre.model || 'Не указана'}</div>
-                            <div><strong>Код:</strong> {tyre.code || 'Не указан'}</div>
-                            <div><strong>Сезон:</strong> {tyre.season === 'W' ? 'Зимняя' : tyre.season === 'S' ? 'Летняя' : tyre.season || 'Не указан'}</div>
-                            <div><strong>Тип:</strong> {tyre.type || 'Не указан'}</div>
-                            {tyre.thorn && <div><strong>Шипы:</strong> {tyre.thorn === '1' ? 'Да' : 'Нет'}</div>}
-                            {tyre.whpr && <div><strong>Цена/Остаток:</strong> {tyre.whpr}</div>}
-                          </Space>
-                        }
-                      />
-                    </Card>
-                  </Col>
-                ))}
-              </Row>
+              <Table 
+                dataSource={results.price_rest_list}
+                columns={columns}
+                rowKey={(record, index) => record.code || index}
+                pagination={{
+                  pageSize: 10,
+                  showSizeChanger: true,
+                  showQuickJumper: true,
+                  showTotal: (total, range) => 
+                    `Показано ${range[0]}-${range[1]} из ${total} записей`
+                }}
+                scroll={{ x: 800 }}
+              />
             ) : (
-              <Alert message="Товары по заданным параметрам не найдены" type="info" showIcon />
+              <Alert message="Товары не найдены" type="info" showIcon />
             )}
           </Card>
         )}
